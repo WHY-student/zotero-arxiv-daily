@@ -151,7 +151,7 @@ class ArxivRetriever(BaseRetriever):
                     else:
                         raise
             if i + 20 < len(all_paper_ids):
-                sleep(3)
+                sleep(20)
         bar.close()
 
         return raw_papers
