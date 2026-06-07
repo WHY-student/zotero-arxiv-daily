@@ -9,6 +9,11 @@ from zotero_arxiv_daily.retriever.arxiv_retriever import ArxivRetriever, _run_wi
 import zotero_arxiv_daily.retriever.arxiv_retriever as arxiv_retriever
 
 
+class AttrDict(dict):
+    def __getattr__(self, name):
+        return self[name]
+
+
 def _sleep_and_return(value: str, delay_seconds: float) -> str:
     time.sleep(delay_seconds)
     return value
@@ -61,6 +66,51 @@ def test_arxiv_retriever(config, mock_feedparser, monkeypatch):
 
     assert len(papers) == len(new_entries)
     assert set(p.title for p in papers) == set(e.title for e in new_entries)
+
+
+def test_arxiv_retriever_retries_transient_api_errors(config, monkeypatch):
+    entries = [
+        AttrDict(id=f"oai:arXiv.org:2606.{i:05d}v1", arxiv_announce_type="new")
+        for i in range(20)
+    ]
+    monkeypatch.setattr(
+        arxiv_retriever.feedparser,
+        "parse",
+        lambda url: SimpleNamespace(feed=SimpleNamespace(title="ok"), entries=entries),
+    )
+
+    fake_results = [
+        SimpleNamespace(
+            title="Recovered Paper",
+            authors=[SimpleNamespace(name="Test Author")],
+            summary="Test abstract",
+            pdf_url="https://arxiv.org/pdf/2606.00000v1",
+            entry_id="https://arxiv.org/abs/2606.00000v1",
+            source_url=lambda: "https://arxiv.org/e-print/2606.00000v1",
+        )
+    ]
+    attempts = {"count": 0}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            assert kwargs["delay_seconds"] == arxiv_retriever.ARXIV_CLIENT_DELAY_SECONDS
+
+        def results(self, search):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise arxiv_retriever.arxiv.HTTPError("https://export.arxiv.org/api/query", 0, 503)
+            return iter(fake_results)
+
+    sleeps: list[int] = []
+    monkeypatch.setattr(arxiv_retriever.arxiv, "Client", FakeClient)
+    monkeypatch.setattr(arxiv_retriever, "sleep", sleeps.append)
+
+    retriever = ArxivRetriever(config)
+    papers = retriever._retrieve_raw_papers()
+
+    assert papers == fake_results
+    assert attempts["count"] == 2
+    assert sleeps == [arxiv_retriever.ARXIV_BATCH_RETRY_BASE_DELAY_SECONDS]
 
 
 def test_run_with_hard_timeout_returns_value():

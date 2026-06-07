@@ -19,6 +19,12 @@ T = TypeVar("T")
 DOWNLOAD_TIMEOUT = (10, 60)
 PDF_EXTRACT_TIMEOUT = 180
 TAR_EXTRACT_TIMEOUT = 180
+ARXIV_CLIENT_DELAY_SECONDS = 30
+ARXIV_BATCH_SIZE = 20
+ARXIV_BATCH_INTERVAL_SECONDS = 180
+ARXIV_BATCH_MAX_RETRIES = 8
+ARXIV_BATCH_RETRY_BASE_DELAY_SECONDS = 120
+ARXIV_TRANSIENT_HTTP_STATUSES = {429, 503}
 
 
 def _download_file(url: str, path: str) -> None:
@@ -114,7 +120,7 @@ class ArxivRetriever(BaseRetriever):
             raise ValueError("category must be specified for arxiv.")
 
     def _retrieve_raw_papers(self) -> list[ArxivResult]:
-        client = arxiv.Client(num_retries=10, delay_seconds=10)
+        client = arxiv.Client(num_retries=10, delay_seconds=ARXIV_CLIENT_DELAY_SECONDS)
         query = '+'.join(self.config.source.arxiv.category)
         include_cross_list = self.config.source.arxiv.get("include_cross_list", False)
         # Get the latest paper from arxiv rss feed
@@ -133,25 +139,26 @@ class ArxivRetriever(BaseRetriever):
 
         # Get full information of each paper from arxiv api
         bar = tqdm(total=len(all_paper_ids))
-        max_batch_retries = 5
-        batch_retry_delay = 30
-        for i in range(0, len(all_paper_ids), 20):
-            search = arxiv.Search(id_list=all_paper_ids[i:i + 20])
-            for attempt in range(max_batch_retries):
+        for i in range(0, len(all_paper_ids), ARXIV_BATCH_SIZE):
+            search = arxiv.Search(id_list=all_paper_ids[i:i + ARXIV_BATCH_SIZE])
+            for attempt in range(ARXIV_BATCH_MAX_RETRIES):
                 try:
                     batch = list(client.results(search))
                     bar.update(len(batch))
                     raw_papers.extend(batch)
                     break
                 except arxiv.HTTPError as exc:
-                    if exc.status == 429 and attempt < max_batch_retries - 1:
-                        wait = batch_retry_delay * (attempt + 1)
-                        logger.warning(f"arXiv API 429 on batch {i // 20}, retry {attempt + 1}/{max_batch_retries} in {wait}s")
+                    if exc.status in ARXIV_TRANSIENT_HTTP_STATUSES and attempt < ARXIV_BATCH_MAX_RETRIES - 1:
+                        wait = ARXIV_BATCH_RETRY_BASE_DELAY_SECONDS * (attempt + 1)
+                        logger.warning(
+                            f"arXiv API {exc.status} on batch {i // ARXIV_BATCH_SIZE}, "
+                            f"retry {attempt + 1}/{ARXIV_BATCH_MAX_RETRIES} in {wait}s"
+                        )
                         sleep(wait)
                     else:
                         raise
-            if i + 20 < len(all_paper_ids):
-                sleep(60)
+            if i + ARXIV_BATCH_SIZE < len(all_paper_ids):
+                sleep(ARXIV_BATCH_INTERVAL_SECONDS)
         bar.close()
 
         return raw_papers
