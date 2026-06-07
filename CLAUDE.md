@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Zotero-arXiv-Daily recommends new arXiv/bioRxiv/medRxiv papers based on a user's Zotero library. It computes embedding similarity between new papers and the user's existing library, generates TLDRs via LLM, and delivers results by email. Designed to run as a GitHub Actions workflow at zero cost.
+Zotero-arXiv-Daily recommends new arXiv/bioRxiv/medRxiv papers based on a user's Zotero library. It computes embedding similarity between new papers and the user's existing library, uses original abstracts as TLDRs, and delivers results by email. Designed to run as a GitHub Actions workflow at zero cost.
 
 ## Commands
 
@@ -35,7 +35,7 @@ The app follows a linear pipeline orchestrated by `Executor` (`src/zotero_arxiv_
 2. **Filter corpus** — applies `include_path` glob patterns to select relevant collections
 3. **Retrieve new papers** — fetches from configured sources (arXiv RSS, bioRxiv/medRxiv REST API)
 4. **Rerank** — scores candidates by weighted similarity to corpus (newer Zotero papers weighted higher)
-5. **Generate TLDRs + affiliations** — via OpenAI-compatible LLM API
+5. **Prepare TLDRs** — uses each paper's original abstract
 6. **Render + send email** — HTML email via SMTP
 
 ### Plugin Systems
@@ -50,7 +50,7 @@ Uses Hydra + OmegaConf. Config is composed from `config/base.yaml` (defaults) + 
 
 ### Data Classes
 
-`Paper` and `CorpusPaper` in `src/zotero_arxiv_daily/protocol.py`. `Paper` has LLM-powered methods (`generate_tldr`, `generate_affiliations`) that call the OpenAI API directly.
+`Paper` and `CorpusPaper` in `src/zotero_arxiv_daily/protocol.py`. `Paper.generate_tldr()` copies the original abstract into the email TLDR field.
 
 ## Testing
 

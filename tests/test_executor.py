@@ -149,7 +149,7 @@ def test_fetch_zotero_corpus_paper_with_zero_collections(config, monkeypatch):
 
 
 def test_run_end_to_end(config, monkeypatch):
-    """Full pipeline: Zotero fetch -> filter -> retrieve -> rerank -> TLDR -> email."""
+    """Full pipeline: Zotero fetch -> filter -> retrieve -> rerank -> email."""
     import smtplib
 
     from omegaconf import open_dict
@@ -172,9 +172,8 @@ def test_run_end_to_end(config, monkeypatch):
     stub_zot = make_stub_zotero_client()
     monkeypatch.setattr("zotero_arxiv_daily.executor.zotero.Zotero", lambda *a, **kw: stub_zot)
 
-    # 2. Stub OpenAI (for reranker + TLDR/affiliations)
+    # 2. Stub OpenAI-compatible embeddings client for the API reranker
     stub_client = make_stub_openai_client()
-    monkeypatch.setattr("zotero_arxiv_daily.executor.OpenAI", lambda **kw: stub_client)
     monkeypatch.setattr("zotero_arxiv_daily.reranker.api.OpenAI", lambda **kw: stub_client)
     retrieved = [
         make_sample_paper(title="E2E Paper 1", score=None),
@@ -226,7 +225,6 @@ def test_run_no_papers_send_empty_false(config, monkeypatch):
     monkeypatch.setattr("zotero_arxiv_daily.executor.zotero.Zotero", lambda *a, **kw: stub_zot)
 
     stub_client = make_stub_openai_client()
-    monkeypatch.setattr("zotero_arxiv_daily.executor.OpenAI", lambda **kw: stub_client)
     monkeypatch.setattr("zotero_arxiv_daily.reranker.api.OpenAI", lambda **kw: stub_client)
 
     import zotero_arxiv_daily.retriever.arxiv_retriever  # noqa: F401
@@ -262,7 +260,6 @@ def test_run_no_papers_send_empty_true(config, monkeypatch):
     monkeypatch.setattr("zotero_arxiv_daily.executor.zotero.Zotero", lambda *a, **kw: stub_zot)
 
     stub_client = make_stub_openai_client()
-    monkeypatch.setattr("zotero_arxiv_daily.executor.OpenAI", lambda **kw: stub_client)
     monkeypatch.setattr("zotero_arxiv_daily.reranker.api.OpenAI", lambda **kw: stub_client)
 
     import zotero_arxiv_daily.retriever.arxiv_retriever  # noqa: F401

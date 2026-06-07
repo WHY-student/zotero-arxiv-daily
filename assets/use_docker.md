@@ -47,11 +47,6 @@ environment:
       - ARXIV_QUERY=cs.AI+cs.CV+cs.LG+cs.CL
       - SEND_EMPTY=False
       - MAX_PAPER_NUM=5
-      - USE_LLM_API=1
-      - OPENAI_API_KEY=sk-your-openai-key-here
-      - OPENAI_API_BASE=https://api.openai.com/v1
-      - MODEL_NAME=Qwen/Qwen1.5-7B-Instruct
-      - LANGUAGE=English
       
       # 新增配置
       - HF_ENDPOINT=https://hf-mirror.com
@@ -70,7 +65,7 @@ docker compose up -d
 
 - **Scheduled Execution**: By default runs daily at 8:00 AM (configurable in `command` section)
 - **Log Persistence**: All logs are saved in the `logs/` directory
-- **Model Caching**: Local LLM models can be cached in `models/` directory
+- **Model Caching**: Local embedding models can be cached in `models/` directory
 - **Resource Isolation**: Runs in a contained environment with all dependencies included
 - **Easy Updates**: Simply rebuild the image when updating the service
 
@@ -79,7 +74,7 @@ docker compose up -d
 You can customize the deployment by:
 
 1. **Changing schedule time**: Edit the cron expression in `command` section (default: `0 8 * * *` means 8:00 AM daily)
-2. **Using local LLM**: Set `USE_LLM_API=0` and uncomment the models volume
+2. **Model cache**: Uncomment the models volume if you use local embedding models
 3. **Proxy settings**: Uncomment and configure proxy environment variables if needed
 4. **Timezone**: Uncomment `TZ` variable to set specific timezone (you may also need to comment `- /etc/localtime:/etc/localtime:ro`)
 
