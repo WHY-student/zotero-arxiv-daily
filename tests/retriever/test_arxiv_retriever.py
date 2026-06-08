@@ -219,6 +219,29 @@ def test_arxiv_retriever_api_fallback_caps_latest_results(config, monkeypatch):
     assert papers == latest_results[:arxiv_retriever.ARXIV_API_FALLBACK_MIN_RESULT_CAP]
 
 
+def test_arxiv_convert_to_paper_does_not_extract_full_text(config, monkeypatch):
+    def fail_if_called(paper):
+        raise AssertionError("full text extraction should not run")
+
+    monkeypatch.setattr(arxiv_retriever, "extract_text_from_tar", fail_if_called)
+    monkeypatch.setattr(arxiv_retriever, "extract_text_from_html", fail_if_called)
+    monkeypatch.setattr(arxiv_retriever, "extract_text_from_pdf", fail_if_called)
+
+    raw_paper = SimpleNamespace(
+        title="Paper title",
+        authors=[SimpleNamespace(name="Test Author")],
+        summary="Abstract text",
+        pdf_url="https://arxiv.org/pdf/2606.00000v1",
+        entry_id="https://arxiv.org/abs/2606.00000v1",
+    )
+
+    paper = ArxivRetriever(config).convert_to_paper(raw_paper)
+
+    assert paper.title == "Paper title"
+    assert paper.abstract == "Abstract text"
+    assert paper.full_text is None
+
+
 def test_run_with_hard_timeout_returns_value():
     result = _run_with_hard_timeout(
         _sleep_and_return, ("done", 0.01), timeout=10, operation="test op", paper_title="paper"
