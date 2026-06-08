@@ -129,11 +129,24 @@ class ArxivRetriever(BaseRetriever):
             raise Exception(f"Invalid ARXIV_QUERY: {query}.")
         raw_papers = []
         allowed_announce_types = {"new", "cross"} if include_cross_list else {"new"}
+        announce_type_counts = {}
+        for entry in feed.entries:
+            announce_type = entry.get("arxiv_announce_type", "new")
+            announce_type_counts[announce_type] = announce_type_counts.get(announce_type, 0) + 1
         all_paper_ids = [
             i.id.removeprefix("oai:arXiv.org:")
             for i in feed.entries
             if i.get("arxiv_announce_type", "new") in allowed_announce_types
         ]
+        logger.info(
+            f"arXiv RSS returned {len(feed.entries)} entries for {query}; "
+            f"announce types: {announce_type_counts}; selected {len(all_paper_ids)} entries."
+        )
+        if len(feed.entries) == 0:
+            logger.warning(
+                "arXiv RSS returned no entries. This can happen before the daily arXiv "
+                "announcement is published or when the RSS endpoint is temporarily empty."
+            )
         if self.config.executor.debug:
             all_paper_ids = all_paper_ids[:10]
 
