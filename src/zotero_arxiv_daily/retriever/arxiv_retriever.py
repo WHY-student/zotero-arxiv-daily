@@ -1,11 +1,9 @@
 from .base import BaseRetriever, register_retriever
-import arxiv
 from arxiv import Result as ArxivResult
 from ..protocol import Paper
 from ..utils import extract_markdown_from_pdf, extract_tex_code_from_tar
 from tempfile import TemporaryDirectory
 import feedparser
-from tqdm import tqdm
 import multiprocessing
 import os
 from queue import Empty
@@ -13,21 +11,14 @@ from time import sleep
 from typing import Any, Callable, TypeVar
 from loguru import logger
 import requests
-from datetime import datetime
 
 T = TypeVar("T")
 
 DOWNLOAD_TIMEOUT = (10, 60)
 PDF_EXTRACT_TIMEOUT = 180
 TAR_EXTRACT_TIMEOUT = 180
-ARXIV_CLIENT_DELAY_SECONDS = 30
-ARXIV_BATCH_SIZE = 20
-ARXIV_BATCH_INTERVAL_SECONDS = 180
-ARXIV_BATCH_MAX_RETRIES = 8
-ARXIV_BATCH_RETRY_BASE_DELAY_SECONDS = 120
-ARXIV_TRANSIENT_HTTP_STATUSES = {429, 503}
-ARXIV_API_FALLBACK_MAX_RESULTS = 300
-ARXIV_API_FALLBACK_MIN_RESULT_CAP = 50
+ARXIV_RSS_EMPTY_RETRY_ATTEMPTS = 3
+ARXIV_RSS_EMPTY_RETRY_DELAY_SECONDS = 600
 
 
 def _download_file(url: str, path: str) -> None:
@@ -123,116 +114,62 @@ class ArxivRetriever(BaseRetriever):
             raise ValueError("category must be specified for arxiv.")
 
     def _retrieve_raw_papers(self) -> list[ArxivResult]:
-        client = arxiv.Client(num_retries=10, delay_seconds=ARXIV_CLIENT_DELAY_SECONDS)
         categories = list(self.config.source.arxiv.category)
         query = '+'.join(categories)
         include_cross_list = self.config.source.arxiv.get("include_cross_list", False)
-        # Get the latest paper from arxiv rss feed
-        feed = feedparser.parse(f"https://rss.arxiv.org/atom/{query}")
-        if 'Feed error for query' in feed.feed.title:
-            raise Exception(f"Invalid ARXIV_QUERY: {query}.")
-        raw_papers = []
+        feed = self._parse_rss_with_retries(query)
         allowed_announce_types = {"new", "cross"} if include_cross_list else {"new"}
         announce_type_counts = {}
         for entry in feed.entries:
             announce_type = entry.get("arxiv_announce_type", "new")
             announce_type_counts[announce_type] = announce_type_counts.get(announce_type, 0) + 1
-        all_paper_ids = [
-            i.id.removeprefix("oai:arXiv.org:")
-            for i in feed.entries
-            if i.get("arxiv_announce_type", "new") in allowed_announce_types
+        raw_papers = [
+            entry for entry in feed.entries
+            if entry.get("arxiv_announce_type", "new") in allowed_announce_types
         ]
         logger.info(
             f"arXiv RSS returned {len(feed.entries)} entries for {query}; "
-            f"announce types: {announce_type_counts}; selected {len(all_paper_ids)} entries."
+            f"announce types: {announce_type_counts}; selected {len(raw_papers)} entries."
         )
-        if len(feed.entries) == 0:
-            logger.warning(
-                "arXiv RSS returned no entries. This can happen before the daily arXiv "
-                "announcement is published or when the RSS endpoint is temporarily empty. "
-                "Falling back to arXiv API latest submissions."
-            )
-            return self._retrieve_latest_papers_from_api(client, categories, include_cross_list)
         if self.config.executor.debug:
-            all_paper_ids = all_paper_ids[:10]
-
-        # Get full information of each paper from arxiv api
-        bar = tqdm(total=len(all_paper_ids))
-        for i in range(0, len(all_paper_ids), ARXIV_BATCH_SIZE):
-            search = arxiv.Search(id_list=all_paper_ids[i:i + ARXIV_BATCH_SIZE])
-            for attempt in range(ARXIV_BATCH_MAX_RETRIES):
-                try:
-                    batch = list(client.results(search))
-                    bar.update(len(batch))
-                    raw_papers.extend(batch)
-                    break
-                except arxiv.HTTPError as exc:
-                    if exc.status in ARXIV_TRANSIENT_HTTP_STATUSES and attempt < ARXIV_BATCH_MAX_RETRIES - 1:
-                        wait = ARXIV_BATCH_RETRY_BASE_DELAY_SECONDS * (attempt + 1)
-                        logger.warning(
-                            f"arXiv API {exc.status} on batch {i // ARXIV_BATCH_SIZE}, "
-                            f"retry {attempt + 1}/{ARXIV_BATCH_MAX_RETRIES} in {wait}s"
-                        )
-                        sleep(wait)
-                    else:
-                        raise
-            if i + ARXIV_BATCH_SIZE < len(all_paper_ids):
-                sleep(ARXIV_BATCH_INTERVAL_SECONDS)
-        bar.close()
+            raw_papers = raw_papers[:10]
 
         return raw_papers
 
-    def _retrieve_latest_papers_from_api(
-        self,
-        client: arxiv.Client,
-        categories: list[str],
-        include_cross_list: bool,
-    ) -> list[ArxivResult]:
-        query = " OR ".join(f"cat:{category}" for category in categories)
-        search = arxiv.Search(
-            query=query,
-            max_results=ARXIV_API_FALLBACK_MAX_RESULTS,
-            sort_by=arxiv.SortCriterion.SubmittedDate,
-            sort_order=arxiv.SortOrder.Descending,
+    def _parse_rss_with_retries(self, query: str) -> Any:
+        feed_url = f"https://rss.arxiv.org/atom/{query}"
+        feed = None
+        for attempt in range(ARXIV_RSS_EMPTY_RETRY_ATTEMPTS):
+            feed = feedparser.parse(feed_url)
+            if 'Feed error for query' in feed.feed.title:
+                raise Exception(f"Invalid ARXIV_QUERY: {query}.")
+            if len(feed.entries) > 0:
+                return feed
+            if attempt < ARXIV_RSS_EMPTY_RETRY_ATTEMPTS - 1:
+                logger.warning(
+                    f"arXiv RSS returned no entries for {query}; retry "
+                    f"{attempt + 1}/{ARXIV_RSS_EMPTY_RETRY_ATTEMPTS} in "
+                    f"{ARXIV_RSS_EMPTY_RETRY_DELAY_SECONDS}s."
+                )
+                sleep(ARXIV_RSS_EMPTY_RETRY_DELAY_SECONDS)
+        logger.warning(
+            "arXiv RSS still returned no entries after retries. This usually means the "
+            "feed has not been updated yet or rss.arxiv.org is temporarily empty."
         )
-        results = list(client.results(search))
-        if not include_cross_list:
-            results = [paper for paper in results if paper.primary_category in categories]
-        if not results:
-            logger.info(f"arXiv API fallback returned no papers for {query}.")
-            return []
-
-        latest_date = max(_published_at(paper).date() for paper in results)
-        latest_results = [
-            paper for paper in results
-            if _published_at(paper).date() == latest_date
-        ]
-        result_cap = self._api_fallback_result_cap()
-        if len(latest_results) > result_cap:
-            latest_results = latest_results[:result_cap]
-        if self.config.executor.debug:
-            latest_results = latest_results[:10]
-        logger.info(
-            f"arXiv API fallback returned {len(results)} candidate papers for {query}; "
-            f"selected {len(latest_results)} papers from latest date {latest_date}."
-        )
-        return latest_results
-
-    def _api_fallback_result_cap(self) -> int:
-        max_paper_num = self.config.email.get("max_paper_num", 10)
-        return max(ARXIV_API_FALLBACK_MIN_RESULT_CAP, int(max_paper_num) * 5)
+        return feed
 
     def convert_to_paper(self, raw_paper: ArxivResult) -> Paper:
         title = raw_paper.title
-        authors = [a.name for a in raw_paper.authors]
-        abstract = raw_paper.summary
-        pdf_url = raw_paper.pdf_url
+        authors = [_author_name(author) for author in raw_paper.authors]
+        abstract = _clean_rss_summary(raw_paper.summary)
+        url = _rss_entry_url(raw_paper)
+        pdf_url = url.replace("/abs/", "/pdf/") if url else None
         return Paper(
             source=self.name,
             title=title,
             authors=authors,
             abstract=abstract,
-            url=raw_paper.entry_id,
+            url=url,
             pdf_url=pdf_url,
             full_text=None,
         )
@@ -274,8 +211,22 @@ def extract_text_from_tar(paper: ArxivResult) -> str | None:
     )
 
 
-def _published_at(paper: ArxivResult) -> datetime:
-    published = paper.published
-    if published.tzinfo is None:
-        return published
-    return published.replace(tzinfo=None)
+def _author_name(author: Any) -> str:
+    if isinstance(author, dict):
+        return author["name"]
+    return author.name
+
+
+def _rss_entry_url(entry: Any) -> str:
+    for link in entry.get("links", []):
+        if link.get("rel") == "alternate":
+            return link["href"]
+    paper_id = entry.id.removeprefix("oai:arXiv.org:")
+    return f"https://arxiv.org/abs/{paper_id}"
+
+
+def _clean_rss_summary(summary: str) -> str:
+    marker = "Abstract:"
+    if marker in summary:
+        return summary.split(marker, 1)[1].strip()
+    return summary.strip()

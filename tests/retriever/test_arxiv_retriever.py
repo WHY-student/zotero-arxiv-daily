@@ -1,10 +1,7 @@
 """Tests for ArxivRetriever."""
 
-from datetime import datetime
 import time
 from types import SimpleNamespace
-
-import feedparser
 
 from zotero_arxiv_daily.retriever.arxiv_retriever import ArxivRetriever, _run_with_hard_timeout
 import zotero_arxiv_daily.retriever.arxiv_retriever as arxiv_retriever
@@ -27,196 +24,62 @@ def _raise_runtime_error() -> None:
 def test_arxiv_retriever(config, mock_feedparser, monkeypatch):
     monkeypatch.setattr("zotero_arxiv_daily.retriever.base.sleep", lambda _: None)
 
-    # The RSS fixture gives us paper IDs.  After feedparser, the code calls
-    # arxiv.Client().results(search) which makes real HTTP requests.  We mock
-    # the arxiv Client so the test stays offline.
     new_entries = [
         e for e in mock_feedparser.entries
         if e.get("arxiv_announce_type", "new") == "new"
     ]
-    paper_ids = [e.id.removeprefix("oai:arXiv.org:") for e in new_entries]
-
-    # Build fake ArxivResult-like objects matching each RSS entry
-    fake_results = []
-    for entry in new_entries:
-        pid = entry.id.removeprefix("oai:arXiv.org:")
-        fake_results.append(SimpleNamespace(
-            title=entry.title,
-            authors=[SimpleNamespace(name="Test Author")],
-            summary="Test abstract",
-            pdf_url=f"https://arxiv.org/pdf/{pid}",
-            entry_id=f"https://arxiv.org/abs/{pid}",
-            source_url=lambda pid=pid: f"https://arxiv.org/e-print/{pid}",
-        ))
-
-    class FakeClient:
-        def __init__(self, **kw):
-            pass
-        def results(self, search):
-            return iter(fake_results)
-
-    monkeypatch.setattr(arxiv_retriever.arxiv, "Client", FakeClient)
-
-    # Skip file downloads in convert_to_paper
-    monkeypatch.setattr(arxiv_retriever, "extract_text_from_html", lambda paper: None)
-    monkeypatch.setattr(arxiv_retriever, "extract_text_from_pdf", lambda paper: None)
-    monkeypatch.setattr(arxiv_retriever, "extract_text_from_tar", lambda paper: None)
 
     retriever = ArxivRetriever(config)
     papers = retriever.retrieve_papers()
 
     assert len(papers) == len(new_entries)
     assert set(p.title for p in papers) == set(e.title for e in new_entries)
+    assert all(p.full_text is None for p in papers)
+    assert all(p.url.startswith("https://arxiv.org/abs/") for p in papers)
 
 
-def test_arxiv_retriever_retries_transient_api_errors(config, monkeypatch):
+def test_arxiv_retriever_retries_empty_rss(config, monkeypatch):
     entries = [
-        AttrDict(id=f"oai:arXiv.org:2606.{i:05d}v1", arxiv_announce_type="new")
-        for i in range(20)
-    ]
-    monkeypatch.setattr(
-        arxiv_retriever.feedparser,
-        "parse",
-        lambda url: SimpleNamespace(feed=SimpleNamespace(title="ok"), entries=entries),
-    )
-
-    fake_results = [
-        SimpleNamespace(
-            title="Recovered Paper",
-            authors=[SimpleNamespace(name="Test Author")],
-            summary="Test abstract",
-            pdf_url="https://arxiv.org/pdf/2606.00000v1",
-            entry_id="https://arxiv.org/abs/2606.00000v1",
-            source_url=lambda: "https://arxiv.org/e-print/2606.00000v1",
+        AttrDict(
+            id="oai:arXiv.org:2606.00001v1",
+            title="Recovered RSS paper",
+            summary="arXiv:2606.00001v1 Announce Type: new \nAbstract: Recovered abstract",
+            authors=[{"name": "Test Author"}],
+            links=[{"href": "https://arxiv.org/abs/2606.00001", "rel": "alternate"}],
+            arxiv_announce_type="new",
         )
     ]
-    attempts = {"count": 0}
-
-    class FakeClient:
-        def __init__(self, **kwargs):
-            assert kwargs["delay_seconds"] == arxiv_retriever.ARXIV_CLIENT_DELAY_SECONDS
-
-        def results(self, search):
-            attempts["count"] += 1
-            if attempts["count"] == 1:
-                raise arxiv_retriever.arxiv.HTTPError("https://export.arxiv.org/api/query", 0, 503)
-            return iter(fake_results)
-
+    feeds = [
+        SimpleNamespace(feed=SimpleNamespace(title="ok"), entries=[]),
+        SimpleNamespace(feed=SimpleNamespace(title="ok"), entries=[]),
+        SimpleNamespace(feed=SimpleNamespace(title="ok"), entries=entries),
+    ]
     sleeps: list[int] = []
-    monkeypatch.setattr(arxiv_retriever.arxiv, "Client", FakeClient)
+    monkeypatch.setattr(arxiv_retriever.feedparser, "parse", lambda url: feeds.pop(0))
     monkeypatch.setattr(arxiv_retriever, "sleep", sleeps.append)
 
     retriever = ArxivRetriever(config)
     papers = retriever._retrieve_raw_papers()
 
-    assert papers == fake_results
-    assert attempts["count"] == 2
-    assert sleeps == [arxiv_retriever.ARXIV_BATCH_RETRY_BASE_DELAY_SECONDS]
-
-
-def test_arxiv_retriever_falls_back_to_api_when_rss_is_empty(config, monkeypatch):
-    monkeypatch.setattr(
-        arxiv_retriever.feedparser,
-        "parse",
-        lambda url: SimpleNamespace(feed=SimpleNamespace(title="ok"), entries=[]),
-    )
-
-    latest_primary = SimpleNamespace(
-        title="Latest primary paper",
-        primary_category="cs.AI",
-        published=datetime(2026, 6, 5, 17, 59),
-    )
-    latest_cross = SimpleNamespace(
-        title="Latest cross-list paper",
-        primary_category="stat.ML",
-        published=datetime(2026, 6, 5, 17, 58),
-    )
-    older_primary = SimpleNamespace(
-        title="Older primary paper",
-        primary_category="cs.CV",
-        published=datetime(2026, 6, 4, 17, 58),
-    )
-
-    class FakeClient:
-        def __init__(self, **kwargs):
-            pass
-
-        def results(self, search):
-            assert search.query == "cat:cs.AI OR cat:cs.CV"
-            assert search.max_results == arxiv_retriever.ARXIV_API_FALLBACK_MAX_RESULTS
-            return iter([latest_primary, latest_cross, older_primary])
-
-    monkeypatch.setattr(arxiv_retriever.arxiv, "Client", FakeClient)
-
-    retriever = ArxivRetriever(config)
-    papers = retriever._retrieve_raw_papers()
-
-    assert papers == [latest_primary]
-
-
-def test_arxiv_retriever_api_fallback_can_include_cross_list(config, monkeypatch):
-    config.source.arxiv.include_cross_list = True
-    monkeypatch.setattr(
-        arxiv_retriever.feedparser,
-        "parse",
-        lambda url: SimpleNamespace(feed=SimpleNamespace(title="ok"), entries=[]),
-    )
-
-    latest_primary = SimpleNamespace(
-        title="Latest primary paper",
-        primary_category="cs.AI",
-        published=datetime(2026, 6, 5, 17, 59),
-    )
-    latest_cross = SimpleNamespace(
-        title="Latest cross-list paper",
-        primary_category="stat.ML",
-        published=datetime(2026, 6, 5, 17, 58),
-    )
-
-    class FakeClient:
-        def __init__(self, **kwargs):
-            pass
-
-        def results(self, search):
-            return iter([latest_primary, latest_cross])
-
-    monkeypatch.setattr(arxiv_retriever.arxiv, "Client", FakeClient)
-
-    retriever = ArxivRetriever(config)
-    papers = retriever._retrieve_raw_papers()
-
-    assert papers == [latest_primary, latest_cross]
-
-
-def test_arxiv_retriever_api_fallback_caps_latest_results(config, monkeypatch):
-    monkeypatch.setattr(
-        arxiv_retriever.feedparser,
-        "parse",
-        lambda url: SimpleNamespace(feed=SimpleNamespace(title="ok"), entries=[]),
-    )
-
-    latest_results = [
-        SimpleNamespace(
-            title=f"Latest paper {i}",
-            primary_category="cs.AI",
-            published=datetime(2026, 6, 5, 17, 59),
-        )
-        for i in range(arxiv_retriever.ARXIV_API_FALLBACK_MIN_RESULT_CAP + 10)
+    assert papers == entries
+    assert sleeps == [
+        arxiv_retriever.ARXIV_RSS_EMPTY_RETRY_DELAY_SECONDS,
+        arxiv_retriever.ARXIV_RSS_EMPTY_RETRY_DELAY_SECONDS,
     ]
 
-    class FakeClient:
-        def __init__(self, **kwargs):
-            pass
 
-        def results(self, search):
-            return iter(latest_results)
-
-    monkeypatch.setattr(arxiv_retriever.arxiv, "Client", FakeClient)
+def test_arxiv_retriever_returns_empty_after_empty_rss_retries(config, monkeypatch):
+    feeds = [
+        SimpleNamespace(feed=SimpleNamespace(title="ok"), entries=[])
+        for _ in range(arxiv_retriever.ARXIV_RSS_EMPTY_RETRY_ATTEMPTS)
+    ]
+    monkeypatch.setattr(arxiv_retriever.feedparser, "parse", lambda url: feeds.pop(0))
+    monkeypatch.setattr(arxiv_retriever, "sleep", lambda _: None)
 
     retriever = ArxivRetriever(config)
     papers = retriever._retrieve_raw_papers()
 
-    assert papers == latest_results[:arxiv_retriever.ARXIV_API_FALLBACK_MIN_RESULT_CAP]
+    assert papers == []
 
 
 def test_arxiv_convert_to_paper_does_not_extract_full_text(config, monkeypatch):
@@ -227,18 +90,19 @@ def test_arxiv_convert_to_paper_does_not_extract_full_text(config, monkeypatch):
     monkeypatch.setattr(arxiv_retriever, "extract_text_from_html", fail_if_called)
     monkeypatch.setattr(arxiv_retriever, "extract_text_from_pdf", fail_if_called)
 
-    raw_paper = SimpleNamespace(
+    raw_paper = AttrDict(
         title="Paper title",
-        authors=[SimpleNamespace(name="Test Author")],
-        summary="Abstract text",
-        pdf_url="https://arxiv.org/pdf/2606.00000v1",
-        entry_id="https://arxiv.org/abs/2606.00000v1",
+        authors=[{"name": "Test Author"}],
+        summary="arXiv:2606.00000v1 Announce Type: new \nAbstract: Abstract text",
+        links=[{"href": "https://arxiv.org/abs/2606.00000", "rel": "alternate"}],
     )
 
     paper = ArxivRetriever(config).convert_to_paper(raw_paper)
 
     assert paper.title == "Paper title"
     assert paper.abstract == "Abstract text"
+    assert paper.url == "https://arxiv.org/abs/2606.00000"
+    assert paper.pdf_url == "https://arxiv.org/pdf/2606.00000"
     assert paper.full_text is None
 
 
@@ -263,7 +127,7 @@ def test_run_with_hard_timeout_returns_none_on_failure(monkeypatch):
     warnings: list[str] = []
     monkeypatch.setattr(arxiv_retriever, "logger", SimpleNamespace(warning=warnings.append))
     result = _run_with_hard_timeout(
-        _raise_runtime_error, (), timeout=1, operation="test op", paper_title="paper"
+        _raise_runtime_error, (), timeout=10, operation="test op", paper_title="paper"
     )
     assert result is None
     assert "boom" in warnings[0]

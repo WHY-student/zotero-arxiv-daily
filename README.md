@@ -146,7 +146,7 @@ That's all! Now you can test the workflow by manually triggering it:
 
 Then check the log and the receiver email after it finishes.
 
-By default, the main workflow runs on 02:00 UTC everyday. You can change this time by editting the workflow config `.github/workflows/main.yml`.
+By default, the main workflow runs on 06:30 UTC everyday, after the scheduled arXiv RSS update window. You can change this time by editting the workflow config `.github/workflows/main.yml`.
 
 ### Local Running
 Supported by [uv](https://github.com/astral-sh/uv), this workflow can easily run on your local device if uv is installed:
