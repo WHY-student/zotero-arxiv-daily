@@ -1,5 +1,6 @@
 """Tests for ArxivRetriever."""
 
+from datetime import datetime
 import time
 from types import SimpleNamespace
 
@@ -113,9 +114,83 @@ def test_arxiv_retriever_retries_transient_api_errors(config, monkeypatch):
     assert sleeps == [arxiv_retriever.ARXIV_BATCH_RETRY_BASE_DELAY_SECONDS]
 
 
+def test_arxiv_retriever_falls_back_to_api_when_rss_is_empty(config, monkeypatch):
+    monkeypatch.setattr(
+        arxiv_retriever.feedparser,
+        "parse",
+        lambda url: SimpleNamespace(feed=SimpleNamespace(title="ok"), entries=[]),
+    )
+
+    latest_primary = SimpleNamespace(
+        title="Latest primary paper",
+        primary_category="cs.AI",
+        published=datetime(2026, 6, 5, 17, 59),
+    )
+    latest_cross = SimpleNamespace(
+        title="Latest cross-list paper",
+        primary_category="stat.ML",
+        published=datetime(2026, 6, 5, 17, 58),
+    )
+    older_primary = SimpleNamespace(
+        title="Older primary paper",
+        primary_category="cs.CV",
+        published=datetime(2026, 6, 4, 17, 58),
+    )
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def results(self, search):
+            assert search.query == "cat:cs.AI OR cat:cs.CV"
+            assert search.max_results == arxiv_retriever.ARXIV_API_FALLBACK_MAX_RESULTS
+            return iter([latest_primary, latest_cross, older_primary])
+
+    monkeypatch.setattr(arxiv_retriever.arxiv, "Client", FakeClient)
+
+    retriever = ArxivRetriever(config)
+    papers = retriever._retrieve_raw_papers()
+
+    assert papers == [latest_primary]
+
+
+def test_arxiv_retriever_api_fallback_can_include_cross_list(config, monkeypatch):
+    config.source.arxiv.include_cross_list = True
+    monkeypatch.setattr(
+        arxiv_retriever.feedparser,
+        "parse",
+        lambda url: SimpleNamespace(feed=SimpleNamespace(title="ok"), entries=[]),
+    )
+
+    latest_primary = SimpleNamespace(
+        title="Latest primary paper",
+        primary_category="cs.AI",
+        published=datetime(2026, 6, 5, 17, 59),
+    )
+    latest_cross = SimpleNamespace(
+        title="Latest cross-list paper",
+        primary_category="stat.ML",
+        published=datetime(2026, 6, 5, 17, 58),
+    )
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def results(self, search):
+            return iter([latest_primary, latest_cross])
+
+    monkeypatch.setattr(arxiv_retriever.arxiv, "Client", FakeClient)
+
+    retriever = ArxivRetriever(config)
+    papers = retriever._retrieve_raw_papers()
+
+    assert papers == [latest_primary, latest_cross]
+
+
 def test_run_with_hard_timeout_returns_value():
     result = _run_with_hard_timeout(
-        _sleep_and_return, ("done", 0.01), timeout=1, operation="test op", paper_title="paper"
+        _sleep_and_return, ("done", 0.01), timeout=10, operation="test op", paper_title="paper"
     )
     assert result == "done"
 

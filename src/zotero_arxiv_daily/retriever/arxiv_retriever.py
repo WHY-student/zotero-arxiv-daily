@@ -13,6 +13,7 @@ from time import sleep
 from typing import Any, Callable, TypeVar
 from loguru import logger
 import requests
+from datetime import datetime
 
 T = TypeVar("T")
 
@@ -25,6 +26,7 @@ ARXIV_BATCH_INTERVAL_SECONDS = 180
 ARXIV_BATCH_MAX_RETRIES = 8
 ARXIV_BATCH_RETRY_BASE_DELAY_SECONDS = 120
 ARXIV_TRANSIENT_HTTP_STATUSES = {429, 503}
+ARXIV_API_FALLBACK_MAX_RESULTS = 300
 
 
 def _download_file(url: str, path: str) -> None:
@@ -121,7 +123,8 @@ class ArxivRetriever(BaseRetriever):
 
     def _retrieve_raw_papers(self) -> list[ArxivResult]:
         client = arxiv.Client(num_retries=10, delay_seconds=ARXIV_CLIENT_DELAY_SECONDS)
-        query = '+'.join(self.config.source.arxiv.category)
+        categories = list(self.config.source.arxiv.category)
+        query = '+'.join(categories)
         include_cross_list = self.config.source.arxiv.get("include_cross_list", False)
         # Get the latest paper from arxiv rss feed
         feed = feedparser.parse(f"https://rss.arxiv.org/atom/{query}")
@@ -145,8 +148,10 @@ class ArxivRetriever(BaseRetriever):
         if len(feed.entries) == 0:
             logger.warning(
                 "arXiv RSS returned no entries. This can happen before the daily arXiv "
-                "announcement is published or when the RSS endpoint is temporarily empty."
+                "announcement is published or when the RSS endpoint is temporarily empty. "
+                "Falling back to arXiv API latest submissions."
             )
+            return self._retrieve_latest_papers_from_api(client, categories, include_cross_list)
         if self.config.executor.debug:
             all_paper_ids = all_paper_ids[:10]
 
@@ -175,6 +180,39 @@ class ArxivRetriever(BaseRetriever):
         bar.close()
 
         return raw_papers
+
+    def _retrieve_latest_papers_from_api(
+        self,
+        client: arxiv.Client,
+        categories: list[str],
+        include_cross_list: bool,
+    ) -> list[ArxivResult]:
+        query = " OR ".join(f"cat:{category}" for category in categories)
+        search = arxiv.Search(
+            query=query,
+            max_results=ARXIV_API_FALLBACK_MAX_RESULTS,
+            sort_by=arxiv.SortCriterion.SubmittedDate,
+            sort_order=arxiv.SortOrder.Descending,
+        )
+        results = list(client.results(search))
+        if not include_cross_list:
+            results = [paper for paper in results if paper.primary_category in categories]
+        if not results:
+            logger.info(f"arXiv API fallback returned no papers for {query}.")
+            return []
+
+        latest_date = max(_published_at(paper).date() for paper in results)
+        latest_results = [
+            paper for paper in results
+            if _published_at(paper).date() == latest_date
+        ]
+        if self.config.executor.debug:
+            latest_results = latest_results[:10]
+        logger.info(
+            f"arXiv API fallback returned {len(results)} candidate papers for {query}; "
+            f"selected {len(latest_results)} papers from latest date {latest_date}."
+        )
+        return latest_results
 
     def convert_to_paper(self, raw_paper: ArxivResult) -> Paper:
         title = raw_paper.title
@@ -231,3 +269,10 @@ def extract_text_from_tar(paper: ArxivResult) -> str | None:
         operation="Tar extraction",
         paper_title=paper.title,
     )
+
+
+def _published_at(paper: ArxivResult) -> datetime:
+    published = paper.published
+    if published.tzinfo is None:
+        return published
+    return published.replace(tzinfo=None)
