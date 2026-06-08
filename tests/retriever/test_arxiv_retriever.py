@@ -188,6 +188,37 @@ def test_arxiv_retriever_api_fallback_can_include_cross_list(config, monkeypatch
     assert papers == [latest_primary, latest_cross]
 
 
+def test_arxiv_retriever_api_fallback_caps_latest_results(config, monkeypatch):
+    monkeypatch.setattr(
+        arxiv_retriever.feedparser,
+        "parse",
+        lambda url: SimpleNamespace(feed=SimpleNamespace(title="ok"), entries=[]),
+    )
+
+    latest_results = [
+        SimpleNamespace(
+            title=f"Latest paper {i}",
+            primary_category="cs.AI",
+            published=datetime(2026, 6, 5, 17, 59),
+        )
+        for i in range(arxiv_retriever.ARXIV_API_FALLBACK_MIN_RESULT_CAP + 10)
+    ]
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def results(self, search):
+            return iter(latest_results)
+
+    monkeypatch.setattr(arxiv_retriever.arxiv, "Client", FakeClient)
+
+    retriever = ArxivRetriever(config)
+    papers = retriever._retrieve_raw_papers()
+
+    assert papers == latest_results[:arxiv_retriever.ARXIV_API_FALLBACK_MIN_RESULT_CAP]
+
+
 def test_run_with_hard_timeout_returns_value():
     result = _run_with_hard_timeout(
         _sleep_and_return, ("done", 0.01), timeout=10, operation="test op", paper_title="paper"

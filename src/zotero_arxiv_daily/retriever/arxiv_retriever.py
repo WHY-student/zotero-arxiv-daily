@@ -27,6 +27,7 @@ ARXIV_BATCH_MAX_RETRIES = 8
 ARXIV_BATCH_RETRY_BASE_DELAY_SECONDS = 120
 ARXIV_TRANSIENT_HTTP_STATUSES = {429, 503}
 ARXIV_API_FALLBACK_MAX_RESULTS = 300
+ARXIV_API_FALLBACK_MIN_RESULT_CAP = 50
 
 
 def _download_file(url: str, path: str) -> None:
@@ -206,6 +207,9 @@ class ArxivRetriever(BaseRetriever):
             paper for paper in results
             if _published_at(paper).date() == latest_date
         ]
+        result_cap = self._api_fallback_result_cap()
+        if len(latest_results) > result_cap:
+            latest_results = latest_results[:result_cap]
         if self.config.executor.debug:
             latest_results = latest_results[:10]
         logger.info(
@@ -213,6 +217,10 @@ class ArxivRetriever(BaseRetriever):
             f"selected {len(latest_results)} papers from latest date {latest_date}."
         )
         return latest_results
+
+    def _api_fallback_result_cap(self) -> int:
+        max_paper_num = self.config.email.get("max_paper_num", 10)
+        return max(ARXIV_API_FALLBACK_MIN_RESULT_CAP, int(max_paper_num) * 5)
 
     def convert_to_paper(self, raw_paper: ArxivResult) -> Paper:
         title = raw_paper.title
